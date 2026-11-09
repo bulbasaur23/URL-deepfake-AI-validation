@@ -2,7 +2,7 @@
 
 Two offline levers keep the suite from touching the network:
 
-1. "patched dial" — the module seams ``fetcher.resolve_ip`` /
+1. "patched dial" — the module seams ``fetcher.resolve_ips`` /
    ``fetcher.is_forbidden_ip`` are monkeypatched. The loopback guard is lifted
    *only* for ``127.0.0.1`` (every real private/loopback/metadata range still
    rejects), because the local test servers bind there.
@@ -270,10 +270,10 @@ def test_http_status_error_mapping(server: str, allow_loopback: None) -> None:
 def test_dns_failure_maps_code(monkeypatch: pytest.MonkeyPatch) -> None:
     """Resolver failures become dns_failure (patched seam: no real lookups)."""
 
-    def unresolvable(host: str, port: int) -> str:
+    def unresolvable(host: str, port: int) -> tuple[str, ...]:
         raise socket.gaierror(-2, "Name or service not known (test stub)")
 
-    monkeypatch.setattr(fetcher, "resolve_ip", unresolvable)
+    monkeypatch.setattr(fetcher, "resolve_ips", unresolvable)
     r = asyncio.run(fetch("http://offline-unreachable.test/x", _mk_settings()))
     assert r.status == "fetch_failed"
     assert r.error_code == "dns_failure"
@@ -284,6 +284,42 @@ def test_timeout_maps_code(server: str, allow_loopback: None) -> None:
     r = asyncio.run(fetch(f"{server}/slow", _mk_settings(fetch_timeout_s=1)))
     assert r.status == "fetch_failed"
     assert r.error_code == "timeout"
+
+
+def test_fetch_refused_when_any_resolved_candidate_forbidden(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Reject-if-any: one forbidden candidate refuses the whole fetch.
+
+    The patched host resolves to a usable public address first and a
+    forbidden 10/8 address second — the DNS round-robin lever. Nothing may
+    even dial: refusal happens at candidate validation, before any socket.
+    """
+
+    def no_dial(*args: object, **kwargs: object) -> object:
+        raise AssertionError("dial attempted although a resolved candidate is forbidden")
+
+    monkeypatch.setattr(fetcher, "_connect", no_dial)
+    monkeypatch.setattr(fetcher, "resolve_ips", lambda host, port: ("93.184.216.34", "10.0.0.1"))
+    r = asyncio.run(fetch("http://round-robin-target.test/x", _mk_settings()))
+    assert r.status == "fetch_failed"
+    assert r.error_code == "private_ip"
+
+
+def test_fetch_proceeds_when_all_candidates_usable(
+    server: str, allow_loopback: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """All candidates usable → normal fetch, dialing the first candidate.
+
+    Two usable loopback candidates resolve for a hostname that is not the
+    fixture address; the second candidate (if wrongly dialed) would be
+    connection-refused, so a pass pins the dial to the *first* candidate.
+    """
+    monkeypatch.setattr(fetcher, "resolve_ips", lambda host, port: ("127.0.0.1", "127.0.0.2"))
+    port = server.rsplit(":", 1)[1]
+    r = asyncio.run(fetch(f"http://round-robin-ok.test:{port}/ok", _mk_settings()))
+    assert r.status == "ok"
+    assert r.content == _OK_BODY
 
 
 def test_item_defaults_and_pinned_vocabularies() -> None:

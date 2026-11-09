@@ -3,9 +3,9 @@
 Owned rules (§7.6 / Global Constraints): http/https scheme allowlist; DNS
 resolve then reject private/loopback/link-local/metadata IPs (127/8, 10/8,
 172.16/12, 192.168/16, 169.254/16, ::1, fc00::/7) — if *any* resolved address
-is forbidden the request is refused; the single remaining IP is pinned and
-dialed directly (no rebinding window between resolution and connection, while
-SNI/Host still name the real host); every redirect hop is re-validated from
+is forbidden the request is refused; otherwise the first candidate is pinned
+and dialed directly (no rebinding window between resolution and connection,
+while SNI/Host still name the real host); every redirect hop is re-validated from
 scratch, at most ``Settings.max_redirects`` follows with loop detection; the
 body is streamed under ``Settings.body_cap_mb`` and, when compressed,
 re-checked after decoding (gzip-bomb guard); socket work uses
@@ -17,7 +17,7 @@ Retry-After handling. ``robots_disallowed`` exists only as a token here.
 
 Transport is stdlib ``http.client`` dialed straight at the pinned IP — no
 proxy support (a proxy would defeat IP pinning). Tests never touch the
-network: they patch the module seams ``resolve_ip`` / ``is_forbidden_ip``
+network: they patch the module seams ``resolve_ips`` / ``is_forbidden_ip``
 ("patched dial") and serve fixture pages from a loopback ``http.server``.
 
 Network errors that fit no taxonomy token (refused / reset / TLS handshake
@@ -118,19 +118,26 @@ def is_forbidden_ip(ip: str) -> bool:
     return any(addr in net for net in _FORBIDDEN_NETS)
 
 
-def resolve_ip(host: str, port: int) -> str:
-    """Resolve ``host`` to the address the socket will dial — the pin.
+def resolve_ips(host: str, port: int) -> tuple[str, ...]:
+    """Resolve ``host`` once to *every* dialable candidate address.
 
     Module-level seam so tests can replace the dial ("patched dial") without
-    touching any network. The lookup repeats at every redirect hop, so the pin
-    lives exactly one connection — a rebinding DNS answer can only mismatch a
-    fresh validation, never a live socket.
+    touching any network. The caller validates the whole list — one forbidden
+    candidate refuses the fetch (reject-if-any) — and the first candidate is
+    the pin. The lookup repeats at every redirect hop, so a pin lives exactly
+    one connection: a rebinding DNS answer can only mismatch a fresh
+    validation, never a live socket.
     """
     infos = socket.getaddrinfo(host, port, type=socket.SOCK_STREAM)
+    candidates: list[str] = []
+    seen: set[str] = set()
     for info in infos:
-        if address := info[4][0]:
-            return str(address)
-    raise socket.gaierror(f"hostname {host!r} resolved to no usable address")
+        if (address := info[4][0]) and address not in seen:
+            seen.add(address)
+            candidates.append(address)
+    if not candidates:
+        raise socket.gaierror(f"hostname {host!r} resolved to no usable address")
+    return tuple(candidates)
 
 
 class _PinnedHTTPSConnection(http.client.HTTPSConnection):
@@ -298,13 +305,15 @@ def _hop_loop(url: str, settings: Settings) -> FetchResult:
                 raise FetchError("redirect_loop", f"already visited {current}", final_url=current)
             visited.add(endpoint)
 
-            pinned_ip = resolve_ip(hop.hostname, hop.port)
-            if is_forbidden_ip(pinned_ip):
+            resolved = resolve_ips(hop.hostname, hop.port)
+            forbidden = [ip for ip in resolved if is_forbidden_ip(ip)]
+            if forbidden:  # reject-if-any: one bad candidate poisons the host
                 raise FetchError(
                     "private_ip",
-                    f"refusing non-public dial target {pinned_ip} for {hop.hostname}",
+                    f"refusing {hop.hostname}: forbidden dial candidates {forbidden}",
                     final_url=current,
                 )
+            pinned_ip = resolved[0]
 
             connection = _connect(hop, pinned_ip, timeout)
             try:
