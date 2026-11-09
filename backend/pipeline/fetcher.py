@@ -11,9 +11,14 @@ body is streamed under ``Settings.body_cap_mb`` and, when compressed,
 re-checked after decoding (gzip-bomb guard); socket work uses
 ``Settings.fetch_timeout_s``.
 
-Explicitly deferred to Task 4 robots politeness: robots.txt enforcement, the
-identifiable User-Agent string (nothing identifying is sent yet), and
-Retry-After handling. ``robots_disallowed`` exists only as a token here.
+Politeness (Task 4): every request names itself with ``robots.USER_AGENT``;
+when ``Settings.respect_robots`` is set each fresh origin is gated through
+``robots.check_allowed`` (which fetches robots.txt over this very channel,
+with the nested consult suppressed via ``robots.robots_fetch_active``), and a
+429 with a usable ``Retry-After`` is retried once after a wait hedged to
+``Settings.engine_timeout_s`` (see ``robots.retry_after_wait``). Without a
+usable header, or once the single retry is spent, the status maps as before;
+``robots_disallowed`` is armed through the consult.
 
 Transport is stdlib ``http.client`` dialed straight at the pinned IP — no
 proxy support (a proxy would defeat IP pinning). Tests never touch the
@@ -34,12 +39,19 @@ import http.client
 import ipaddress
 import socket
 import ssl
+import time
 import urllib.parse
 import zlib
 from collections.abc import Iterator
 from typing import NamedTuple
 
 from app.settings import Settings
+from pipeline.robots import (
+    USER_AGENT,
+    check_allowed,
+    retry_after_wait,
+    robots_fetch_active,
+)
 from pipeline.types import FetchErrorCode, FetchResult
 
 
@@ -290,20 +302,43 @@ def _iter_response(response: http.client.HTTPResponse) -> Iterator[bytes]:
 
 
 def _hop_loop(url: str, settings: Settings) -> FetchResult:
-    """Validate → resolve → dial → (redirect?) loop; FetchError when unsafe."""
+    """Validate → robots → resolve → dial → (redirect? | 429-retry?) loop."""
     cap = settings.body_cap_mb * 1_048_576
     timeout = float(settings.fetch_timeout_s)
     budget = int(settings.max_redirects)
+    retry_budget = 1  # one Retry-After-honored retry per fetch, never more
     current = url
     visited: set[tuple[str, str, int, str]] = set()
+    robots_ok: dict[tuple[str, str, int], bool] = {}  # one consult per origin
+    retry_pending = False
 
     try:
         while True:
             hop = _parse_url(current)
             endpoint = (hop.scheme, hop.hostname, hop.port, hop.request_target)
-            if endpoint in visited:  # fragment-only differences still loop
-                raise FetchError("redirect_loop", f"already visited {current}", final_url=current)
-            visited.add(endpoint)
+            if retry_pending:
+                # Retry-After re-entry: the same endpoint was already visited
+                # and policed; re-validation below still runs on fresh DNS,
+                # only the bookkeeping must not re-fire (it would read as a
+                # redirect loop).
+                retry_pending = False
+            else:
+                if endpoint in visited:  # fragment-only differences still loop
+                    raise FetchError(
+                        "redirect_loop", f"already visited {current}", final_url=current
+                    )
+                visited.add(endpoint)
+
+                if settings.respect_robots and not robots_fetch_active():
+                    origin = (hop.scheme, hop.hostname, hop.port)
+                    if origin not in robots_ok:
+                        robots_ok[origin] = check_allowed(current)
+                    if not robots_ok[origin]:  # the origin's own robots.txt spoke
+                        raise FetchError(
+                            "robots_disallowed",
+                            f"robots.txt forbids fetching {current}",
+                            final_url=current,
+                        )
 
             resolved = resolve_ips(hop.hostname, hop.port)
             forbidden = [ip for ip in resolved if is_forbidden_ip(ip)]
@@ -322,6 +357,7 @@ def _hop_loop(url: str, settings: Settings) -> FetchResult:
                     hop.request_target,
                     headers={
                         "Host": hop.host_header,
+                        "User-Agent": USER_AGENT,  # politeness identity (robots/rate limits)
                         "Accept-Encoding": "gzip, deflate",  # only advertised codes
                         "Connection": "close",
                     },
@@ -361,6 +397,18 @@ def _hop_loop(url: str, settings: Settings) -> FetchResult:
                             http_status=response.status,
                         ) from exc
                     continue  # finally closes this; the next hop re-validates fully
+
+                if response.status == 429:
+                    # Politeness: honor the requested Retry-After exactly once
+                    # (hedged at engine_timeout_s); no usable header or an
+                    # already-spent budget falls through to the mapped error.
+                    wait = retry_after_wait(response.headers)
+                    if wait is not None and retry_budget > 0:
+                        retry_budget -= 1
+                        retry_pending = True
+                        connection.close()  # do not hold the socket while waiting
+                        time.sleep(wait)
+                        continue  # finally close is idempotent; fresh dial after
 
                 raise FetchError(
                     _error_code_for_status(response.status),
