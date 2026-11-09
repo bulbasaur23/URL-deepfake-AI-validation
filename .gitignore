@@ -14,3 +14,5 @@ media/*
 models/*
 !models/.gitkeep
 .superpowers/
+.opencode/
+opencode.json
