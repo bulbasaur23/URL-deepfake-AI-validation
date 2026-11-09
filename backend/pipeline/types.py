@@ -1,0 +1,90 @@
+"""Pipeline value objects (Task 3 slice: FetchResult + Item).
+
+The Task 2 review pin froze the status vocabularies; every token lives here
+exactly once and later tasks reuse these aliases instead of re-declaring:
+
+- ``FetchStatus`` — scan fetch stage outcomes: ``ok | fetch_failed``.
+- ``FetchErrorCode`` — ``bad_scheme | private_ip | redirect_loop |
+  redirect_too_many | body_too_large | timeout | dns_failure | http_4xx |
+  http_5xx | http_429 | robots_disallowed``. ``robots_disallowed`` is defined
+  here only as a token; robots.txt behaviour belongs to Task 4.
+- ``ItemStatus`` — ``ok | degraded | unavailable | blocked_by_site |
+  fetch_failed | too_large | unsupported``. Item.status defaults to ``"ok"``.
+
+Never persist a token outside its set; typing catches drift in downstream
+tasks. ``EngineResult`` / ``ItemInput`` join this module in their own tasks,
+so ``engine_results`` is typed ``list[Any]`` until then.
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+from typing import Any, Literal
+
+FetchStatus = Literal["ok", "fetch_failed"]
+FetchErrorCode = Literal[
+    "bad_scheme",
+    "private_ip",
+    "redirect_loop",
+    "redirect_too_many",
+    "body_too_large",
+    "timeout",
+    "dns_failure",
+    "http_4xx",
+    "http_5xx",
+    "http_429",
+    "robots_disallowed",
+]
+ItemStatus = Literal[
+    "ok",
+    "degraded",
+    "unavailable",
+    "blocked_by_site",
+    "fetch_failed",
+    "too_large",
+    "unsupported",
+]
+ItemKind = Literal["text", "image"]
+
+
+@dataclass
+class FetchResult:
+    """Outcome of one SSRF-guarded fetch (``fetcher.fetch``).
+
+    ``content``/``content_type`` carry payload only when ``status == "ok"``.
+    On failure, ``http_status`` is the last seen HTTP status (``None`` when the
+    fetch never got a response, e.g. bad scheme / DNS / dial timeout) and
+    ``final_url`` is the last attempted URL.
+    """
+
+    status: FetchStatus
+    content: bytes = b""
+    content_type: str = ""
+    http_status: int | None = None
+    final_url: str | None = None
+    error_code: FetchErrorCode | None = None
+
+
+@dataclass
+class Item:
+    """One extractable content payload belonging to a scanned page.
+
+    Task 5's extractor produces items (text + label, images with paths); Task
+    7's engine runner appends to ``engine_results``. Required fields come
+    first (dataclass rule), so optional fields are keyword-only in practice —
+    semantics follow the brief's listing exactly, only positional order moved
+    to keep the class constructible.
+    """
+
+    kind: ItemKind
+    label: str
+    source_ref: str
+    text: str | None = None
+    image_path: str | None = None
+    mime: str | None = None
+    status: ItemStatus = "ok"
+    language: str | None = None
+    verdict: str | None = None
+    confidence: float | None = None
+    # Filled by the engine runner (Task 7); typed once EngineResult exists.
+    engine_results: list[Any] = field(default_factory=list)
