@@ -13,7 +13,8 @@ exactly once and later tasks reuse these aliases instead of re-declaring:
 
 Never persist a token outside its set; typing catches drift in downstream
 tasks. ``EngineResult`` / ``ItemInput`` join this module in their own tasks,
-so ``engine_results`` is typed ``list[Any]`` until then.
+so ``engine_results`` is typed ``list[Any]`` until then. ``ImageRef`` joins
+here with the Task 5 extractor.
 """
 
 from __future__ import annotations
@@ -88,3 +89,21 @@ class Item:
     confidence: float | None = None
     # Filled by the engine runner (Task 7); typed once EngineResult exists.
     engine_results: list[Any] = field(default_factory=list)
+
+
+@dataclass
+class ImageRef:
+    """One extractable image candidate (Task 5) — Task 7 turns it into an Item.
+
+    ``url_candidates`` lists sources in extraction order — ``src`` first (when
+    present), then ``srcset`` entries in attribute order — each as
+    ``(absolute_url, width_or_None)`` where ``width`` is the ``w`` descriptor
+    in natural pixels (``None`` for plain srcs and ``x`` descriptors). The
+    extractor excludes ``data:`` URIs and non-http(s) candidates, so Task 7
+    never sees them. Task 7 resolves the winner: highest ``width``; last entry
+    when no widths exist (yielding ``src`` when srcset is absent outright).
+    """
+
+    label: str
+    url_candidates: list[tuple[str, int | None]]
+    source_ref: str
