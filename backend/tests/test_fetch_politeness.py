@@ -40,14 +40,18 @@ _ROBOTS_ALLOW_ALL = "User-agent: *\nAllow: /\n"
 
 # Fixture origin state; each test installs what it needs before fetching.
 _ROBOTS_TXT: str = _ROBOTS_ALLOW_ALL  # default: permissive robots.txt
+_ROBOTS_STATUS: int = 200  # default: a healthy robots.txt endpoint
+_RETRY_AFTER: str = "2"  # default: the /rate-limited 429's requested wait
 _REQUESTS: list[tuple[float, str, str]] = []  # (time.monotonic(), path, User-Agent)
 _HITS: dict[str, int] = {}  # per-path request counter (the 429-then-200 route)
 
 
-def _install(robots_txt: str) -> None:
-    """Install a fresh robots.txt and clear the request log / hit counters."""
-    global _ROBOTS_TXT
+def _install(robots_txt: str, *, robots_status: int = 200, retry_after: str = "2") -> None:
+    """Install fixture state (robots body/status + 429 Retry-After) + clears."""
+    global _ROBOTS_TXT, _ROBOTS_STATUS, _RETRY_AFTER
     _ROBOTS_TXT = robots_txt
+    _ROBOTS_STATUS = robots_status
+    _RETRY_AFTER = retry_after
     _REQUESTS.clear()
     _HITS.clear()
 
@@ -80,16 +84,20 @@ class _Handler(http.server.BaseHTTPRequestHandler):
         _REQUESTS.append((time.monotonic(), path, ua))
         try:
             if path == "/robots.txt":
-                self._send(200, [("Content-Type", "text/plain")], _ROBOTS_TXT.encode())
+                if _ROBOTS_STATUS == 200:
+                    body = _ROBOTS_TXT.encode()
+                else:  # the unreachable-robots fixtures (500 / 404 buckets)
+                    body = b"fixture robots unavailable"
+                self._send(_ROBOTS_STATUS, [("Content-Type", "text/plain")], body)
             elif path == "/page":
                 self._send(200, [("Content-Type", _PAGE_CTYPE)], _PAGE_BODY)
             elif path == "/rate-limited":
                 hit = _HITS.get(path, 0) + 1
                 _HITS[path] = hit
-                if hit == 1:  # first attempt: 429 with the requested wait of 2 s
+                if hit == 1:  # first attempt: 429 with the requested wait
                     self._send(
                         429,
-                        [("Content-Type", "text/plain"), ("Retry-After", "2")],
+                        [("Content-Type", "text/plain"), ("Retry-After", _RETRY_AFTER)],
                         b"fixture rate limit",
                     )
                 else:  # the one retry: success with intact data
@@ -216,6 +224,12 @@ def test_retry_after_seconds_and_garbage() -> None:
     assert retry_after_wait({"Retry-After": " 3 "}) == 3.0  # trimmed, below the cap
     assert retry_after_wait({}) is None
     assert retry_after_wait({"Retry-After": "soon-ish"}) is None
+    # No-category exotic digits ("²", "①") must classify as garbage → None; the
+    # pre-hardening isdigit() accepted them and float() then raised a raw
+    # ValueError (fix round 1, finding #2).
+    assert retry_after_wait({"Retry-After": "²"}) is None
+    assert retry_after_wait({"Retry-After": "①"}) is None
+    assert retry_after_wait({"Retry-After": "② seconds"}) is None
 
 
 def test_retry_after_http_date() -> None:
@@ -244,3 +258,53 @@ def test_respect_robots_false_skips_consult(server: str, allow_loopback: None) -
     assert r.status == "ok"
     assert r.content == _PAGE_BODY
     assert _paths() == ["/page"]  # no robots.txt consult happened at all
+
+
+# --- fix round 1: strict robots-unreachable policy (RFC 9309 bucket split) -------
+
+
+def test_robots_unreachable_5xx_disallow(server: str, allow_loopback: None) -> None:
+    """RFC 9309 §2.3.1.4: unreachable robots (5xx) → complete disallow, no dial."""
+    _install(_ROBOTS_ALLOW_ALL, robots_status=500)
+    r = asyncio.run(fetch(f"{server}/page", _mk_settings()))
+    assert r.status == "fetch_failed"
+    assert r.error_code == "robots_disallowed"
+    assert _paths() == ["/robots.txt"]  # the page is provably never dialed
+
+    # Consult-level pin of the ruling: the bucket split lives in check_allowed.
+    # (Lazy import also lets this file collect RED while pipeline.robots is
+    # still unhardened; running it after the fetch keeps the log assert clean.)
+    from pipeline.robots import check_allowed
+
+    assert check_allowed(f"{server}/page") is False
+
+
+def test_robots_404_permissive(server: str, allow_loopback: None) -> None:
+    """RFC 9309 §2.3.1.3: 4xx robots.txt = unavailable → permissive fetch.
+
+    Hardening guard: the must-stay-permissive bucket while 5xx/DNS/timeouts
+    moved to complete disallow. (Also passes pre-hardening under the old
+    unconditional fail-open; it pins that hardening 5xx must NOT drag the
+    4xx bucket along.)
+    """
+    _install("cannot serve robots", robots_status=404)
+    r = asyncio.run(fetch(f"{server}/page", _mk_settings()))
+    assert r.status == "ok"
+    assert r.content == _PAGE_BODY
+    assert _paths() == ["/robots.txt", "/page"]  # consult ran, page still served
+
+
+def test_429_hostile_retry_after_header_nonfatal(server: str, allow_loopback: None) -> None:
+    """A hostile Retry-After digit must fold to http_429, never raise.
+
+    "²" (latin-1 wire-safe, unlike circled "②" which http.server cannot even
+    send) passes the old isdigit() check but crashes float(); with the
+    hardened parser it is garbage → no wait → the existing single-attempt
+    http_429 FetchResult fallback (fix round 1, finding #2).
+    """
+    _install(_ROBOTS_ALLOW_ALL, retry_after="²")  # No-category digit, latin-1
+    r = asyncio.run(fetch(f"{server}/rate-limited", _mk_settings()))  # must not raise
+    assert r.status == "fetch_failed"
+    assert r.error_code == "http_429"
+    assert r.http_status == 429
+    assert _HITS.get("/rate-limited") == 1  # garbage header → the single attempt

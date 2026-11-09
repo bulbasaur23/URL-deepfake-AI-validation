@@ -4,11 +4,20 @@
 
 - ``check_allowed(url)`` fetches the target origin's ``robots.txt`` through
   ``fetch()`` — the one SSRF-guarded channel (same resolve/refuse/pin rules)
-  — and answers whether our product token may crawl ``url`` (stdlib
-  ``urllib.robotparser``, following RFC 9309). A robots.txt that cannot be
-  retrieved (404, auth wall, DNS or transport failure) is a *permissive*
-  outcome: an unanswerable robots endpoint must not become a site-wide veto,
-  and the content fetch itself still reports the real status downstream.
+  — and answers whether our product token may crawl ``url`` (parsed by stdlib
+  ``urllib.robotparser``). Verdict policy is a deliberate RFC split, NOT
+  blanket RFC 9309 conformance:
+
+  * consult ``ok`` → the parsed robots.txt rules decide (RFC 9309 record
+    semantics);
+  * consult ``http_4xx`` — the site answers 4xx for robots.txt, i.e. the
+    "unavailable-robots" case of RFC 9309 §2.3.1.3 — → permissive: crawl on,
+    unverified;
+  * everything else is an *unreachable* robots source under RFC 9309
+    §2.3.1.4 — ``dns_failure``, ``timeout``, ``http_5xx``, and transport
+    failures that carry no token — plus any other unverifiable consult
+    outcome (``http_429`` after the retry is spent, redirect/body bookkeeping
+    failures) — → complete disallow (``check_allowed`` returns ``False``).
 - ``retry_after_wait(headers)`` reads ``Retry-After`` (delay-seconds or
   HTTP-date, RFC 9110 §10.2.1) in seconds, hedged at
   ``Settings.engine_timeout_s``, so a hostile header cannot park the scan
@@ -82,9 +91,16 @@ def check_allowed(url: str) -> bool:
 
 
 def _permitted(result: FetchResult, url: str) -> bool:
-    """robots.txt retrievable → parse and match our token; otherwise permissive."""
-    if result.status != "ok":  # 404 / auth wall / DNS / dial failure → allow
-        return True
+    """Verdict mapping: RFC split, NOT blanket conformance.
+
+    ``ok`` → parsed rules decide; ``http_4xx`` → permissive per the
+    unavailable-robots case of RFC 9309 §2.3.1.3; everything else (RFC 9309
+    §2.3.1.4 unreachable server: ``dns_failure``, ``timeout``, ``http_5xx``,
+    and untokened transport failures, plus any other unverifiable consult
+    outcome such as a spent-retry ``http_429``) → complete disallow.
+    """
+    if result.status != "ok":
+        return result.error_code == "http_4xx"  # §2.3.1.3; rest §2.3.1.4
     parser = urllib.robotparser.RobotFileParser()
     parser.parse(result.content.decode("utf-8", errors="replace").splitlines())
     return parser.can_fetch(_PRODUCT_TOKEN, url)
@@ -103,8 +119,11 @@ def retry_after_wait(response_headers: Any) -> float | None:
     if not isinstance(raw, str) or not raw.strip():
         return None
     value = raw.strip()
-    if value.isdigit():
-        wait = float(value)
+    if value.isdecimal():  # isdigit() would accept non-decimal digits like "²"
+        try:
+            wait = float(value)
+        except ValueError:  # belt for future digit categories: garbage → None
+            return None
     else:
         try:
             deadline = email.utils.parsedate_to_datetime(value)

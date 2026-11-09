@@ -302,7 +302,7 @@ def _iter_response(response: http.client.HTTPResponse) -> Iterator[bytes]:
 
 
 def _hop_loop(url: str, settings: Settings) -> FetchResult:
-    """Validate → robots → resolve → dial → (redirect? | 429-retry?) loop."""
+    """Validate → resolve → robots → dial → (redirect? | 429-retry?) loop."""
     cap = settings.body_cap_mb * 1_048_576
     timeout = float(settings.fetch_timeout_s)
     budget = int(settings.max_redirects)
@@ -329,17 +329,6 @@ def _hop_loop(url: str, settings: Settings) -> FetchResult:
                     )
                 visited.add(endpoint)
 
-                if settings.respect_robots and not robots_fetch_active():
-                    origin = (hop.scheme, hop.hostname, hop.port)
-                    if origin not in robots_ok:
-                        robots_ok[origin] = check_allowed(current)
-                    if not robots_ok[origin]:  # the origin's own robots.txt spoke
-                        raise FetchError(
-                            "robots_disallowed",
-                            f"robots.txt forbids fetching {current}",
-                            final_url=current,
-                        )
-
             resolved = resolve_ips(hop.hostname, hop.port)
             forbidden = [ip for ip in resolved if is_forbidden_ip(ip)]
             if forbidden:  # reject-if-any: one bad candidate poisons the host
@@ -349,6 +338,23 @@ def _hop_loop(url: str, settings: Settings) -> FetchResult:
                     final_url=current,
                 )
             pinned_ip = resolved[0]
+
+            # Politeness gate: the LAST check before dialing, so the SSRF
+            # guard and the URL parser own their verdicts (private_ip /
+            # dns_failure / bad_scheme) and robots never re-labels them; from
+            # here on the origin is verified dialable, and a robots.txt
+            # that cannot then be retrieved is genuinely unreachable (the
+            # strict bucket split in robots._permitted applies).
+            if settings.respect_robots and not robots_fetch_active():
+                origin = (hop.scheme, hop.hostname, hop.port)
+                if origin not in robots_ok:
+                    robots_ok[origin] = check_allowed(current)
+                if not robots_ok[origin]:  # the origin's own robots.txt spoke
+                    raise FetchError(
+                        "robots_disallowed",
+                        f"robots.txt forbids fetching {current}",
+                        final_url=current,
+                    )
 
             connection = _connect(hop, pinned_ip, timeout)
             try:
