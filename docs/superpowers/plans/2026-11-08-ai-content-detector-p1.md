@@ -142,15 +142,13 @@ def test_private_and_metadata_ips_rejected(url):
     r = asyncio.run(fetch(url, settings))
     assert r.status == "fetch_failed"
     assert r.error_code in {"private_ip", "bad_scheme"}
-
-def test_success_roundtrip(): local http.server 200 page → status "ok", content_type kept, final_url set.
 ```
 
 Additional fixture tests (same file, described):
 
+- `test_success_roundtrip` — local http.server 200 page → status `"ok"`, content type kept, `final_url` set.
 - `test_body_cap_10mb` — local server streams 10 MB + 1 → `error_code == "body_too_large"`.
 - `test_three_redirects_ok_fourth_rejected` — hop-by-hop IP re-validation through 3 hops passes; a 4th hop → `error_code == "redirect_too_many"`.
-```
 
 - [ ] **Step 2:** Run → FAIL. Implement. Run → PASS. Commit: `feat(pipeline): ssrf-safe fetcher`.
 
