@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import sqlite3
+import threading
 from pathlib import Path
 
 from sqlalchemy import Engine, create_engine, event
@@ -16,7 +17,10 @@ _MEMORY_URL = "sqlite://"
 
 # Engines are cached per URL: session-per-request must not rebuild a pool, and
 # repeated get_session() calls with db_path=":memory:" must hit the same DB.
+# _LOCK serializes cache misses so concurrent callers cannot check-then-act
+# their way into two engines (:memory: SQLite would hand the loser an empty DB).
 _ENGINES: dict[str, Engine] = {}
+_LOCK = threading.Lock()
 
 
 def _sqlite_url(db_path: str) -> str:
@@ -57,12 +61,13 @@ def _new_engine(url: str) -> Engine:
 
 
 def _engine_for(url: str) -> Engine:
-    engine = _ENGINES.get(url)
-    if engine is None:
-        if url != _MEMORY_URL:
-            _mkdir_for(url)
-        engine = _new_engine(url)
-        _ENGINES[url] = engine
+    with _LOCK:
+        engine = _ENGINES.get(url)
+        if engine is None:
+            if url != _MEMORY_URL:
+                _mkdir_for(url)
+            engine = _new_engine(url)
+            _ENGINES[url] = engine
     return engine
 
 

@@ -1,14 +1,16 @@
 """Task 2: four-table schema tests (Task 2 brief §1), all on in-memory SQLite."""
 
+import threading
 from collections.abc import Generator
 from datetime import timedelta
 
 import pytest
-from sqlalchemy import select
+from sqlalchemy import Engine, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.settings import Settings
+from db import session as db_session
 from db.models import Base, EngineResultORM, Scan, ScanItem, Snapshot
 from db.session import get_session
 
@@ -35,7 +37,7 @@ def test_round_trip(memory_session: Session) -> None:
     scan = Scan(
         url="https://example.com/watch?v=1",
         url_canonical="https://example.com/watch?v=1",
-        status="completed",
+        status="done",
         verdict="insufficient_data",
         confidence=42.5,
         ip_hash="0f1e2d3c4b5a",
@@ -47,7 +49,7 @@ def test_round_trip(memory_session: Session) -> None:
         kind="text",
         source_ref="body:text:main",
         label="main article",
-        status="completed",
+        status="ok",
         verdict="human",
         confidence=3.25,
     )
@@ -56,7 +58,7 @@ def test_round_trip(memory_session: Session) -> None:
         kind="image",
         source_ref="img[0]",
         label=None,  # image alt/caption may be absent
-        status="completed",
+        status="ok",
         verdict="unclear",
         confidence=44.0,
     )
@@ -78,7 +80,7 @@ def test_round_trip(memory_session: Session) -> None:
     loaded = session.get(Scan, scan.id)
     assert loaded is not None
     assert loaded.url_canonical == "https://example.com/watch?v=1"
-    assert loaded.status == "completed" and loaded.verdict == "insufficient_data"
+    assert loaded.status == "done" and loaded.verdict == "insufficient_data"
     assert loaded.title == "Example Page" and loaded.domain == "example.com"
 
     by_kind = {item.kind: item for item in loaded.items}  # scan.items round-trips
@@ -101,7 +103,7 @@ def test_foreign_keys_reject_orphan_rows(memory_session: Session) -> None:
         kind="text",
         source_ref="body:text",
         label=None,
-        status="failed",
+        status="fetch_failed",
     )
     memory_session.add(orphan)
     with pytest.raises(IntegrityError):
@@ -122,5 +124,33 @@ def test_file_db_is_created_and_persists_across_sessions(tmp_path) -> None:
     row = reader.scalar(select(Scan).order_by(Scan.id))
     assert row is not None
     assert row.url == "https://example.org"
-    assert row.verdict is None  # pending scans carry no verdict yet
+    assert row.status == "queued"  # model default; no fixture sets a status here
+    assert row.verdict is None  # queued scans carry no verdict yet
     reader.close()
+
+
+def test_concurrent_get_session_shares_one_memory_engine() -> None:
+    """Fix round 1 #2: two threads racing a cold engine cache get one engine.
+
+    Regression canary for the check-then-act unlock: on the pre-fix code both
+    threads miss the empty cache and build two distinct engines, failing the
+    identity assertion. Races `_engine_for` directly since that lock is the
+    fix; the private cache is reached only to reset it for a cold start.
+    """
+    url = db_session._sqlite_url(":memory:")
+    db_session._ENGINES.pop(url, None)
+    barrier = threading.Barrier(2)
+    engines: list[Engine] = []
+
+    def worker() -> None:
+        barrier.wait()
+        engines.append(db_session._engine_for(url))
+
+    threads = [threading.Thread(target=worker) for _ in range(2)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+
+    assert len(engines) == 2
+    assert engines[0] is engines[1]  # the lock turns the double-miss into a hit

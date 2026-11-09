@@ -37,8 +37,9 @@ class Scan(Base):
     # Filled in after the fetch (Tasks 12/14/16); unknown until then.
     title: Mapped[str | None] = mapped_column(String(512))
     domain: Mapped[str | None] = mapped_column(String(255))
-    # pending | analyzing | completed | failed — written by the scan orchestrator.
-    status: Mapped[str] = mapped_column(String(32), default="pending")
+    # queued | fetching | parsing | analyzing | aggregating | done | failed —
+    # written by the scan orchestrator.
+    status: Mapped[str] = mapped_column(String(32), default="queued")
     # authentic | unclear | synthetic | insufficient_data (§3.4 verdict bands);
     # None while the scan is still running or failed.
     verdict: Mapped[str | None] = mapped_column(String(32))
