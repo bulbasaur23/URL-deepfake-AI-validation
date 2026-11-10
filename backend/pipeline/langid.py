@@ -60,10 +60,11 @@ def detect(text: str, settings: Any) -> str | None:
 
     ``None`` is returned — never a guess — when langdetect cannot classify:
     blank input (empty/whitespace), strings with no removable language
-    features (emoji/digit/symbol-only), or anything else rejected with
-    ``LangDetectException``. A ``None`` caller contract: treat it as "flows
-    to the engines unmarked"; a failed detection is not evidence of
-    non-English.
+    features (emoji/digit/symbol-only), anything else rejected with
+    ``LangDetectException``, or langdetect's own ``"unknown"`` sentinel
+    (no candidate cleared its probability threshold — not an ISO-639-1
+    code). A ``None`` caller contract: treat it as "flows to the engines
+    unmarked"; a failed detection is not evidence of non-English.
 
     ``settings`` is part of the plan's gate signature and is deliberately
     unused: langdetect exposes no threshold concept worth adopting, so no
@@ -74,9 +75,16 @@ def detect(text: str, settings: Any) -> str | None:
     if not stripped:
         return None
     try:
-        return _langdetect(stripped)
+        code = _langdetect(stripped)
     except LangDetectException:
         return None
+    # langdetect signals "no profile cleared its probability threshold" by
+    # returning the sentinel ``UNKNOWN_LANG == "unknown"`` rather than
+    # raising — not an ISO-639-1 code. Map it to ``None`` (the same
+    # uncertain semantics as every failure path above): unattributable
+    # text is not evidence of non-English, so it stays unmarked and keeps
+    # flowing to the engines.
+    return None if code == "unknown" else code
 
 
 def mark_text_items(items: list[Item], settings: Any) -> int:

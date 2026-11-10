@@ -18,7 +18,10 @@ signature shape so a later task could add a tunable without call-site churn.
 
 from __future__ import annotations
 
+import pytest
+
 from app.settings import Settings
+from pipeline import langid
 from pipeline.langid import NON_ENGLISH_WARNING, detect, mark_text_items
 from pipeline.types import Item
 
@@ -113,6 +116,20 @@ def test_blank_text_item_stays_ok_and_unmarked() -> None:
     assert mark_text_items([item], _SETTINGS) == 0
     assert item.status == "ok"
     assert item.language is None
+
+
+def test_unknown_token_maps_to_uncertain_none(monkeypatch: pytest.MonkeyPatch) -> None:
+    """langdetect's literal "unknown" token is NOT an ISO-639-1 code — map to None.
+
+    When no candidate clears langdetect's probability threshold, its Detector
+    returns the sentinel ``UNKNOWN_LANG == "unknown"`` instead of raising.
+    Passing that token through would mark such text ``status="unsupported"``
+    with ``language="unknown"``, letting Task 12's non-English page warning
+    fire on text whose language cannot be attributed at all. Same uncertain
+    semantics as every other None path: unmarked, flows to the engines.
+    """
+    monkeypatch.setattr(langid, "_langdetect", lambda text: "unknown")
+    assert langid.detect(_ENGLISH_TEXT, _SETTINGS) is None
 
 
 # --- ruling: image items are gated nowhere here ----------------------------------
