@@ -12,15 +12,15 @@ exactly once and later tasks reuse these aliases instead of re-declaring:
   fetch_failed | too_large | unsupported``. Item.status defaults to ``"ok"``.
 
 Never persist a token outside its set; typing catches drift in downstream
-tasks. ``EngineResult`` / ``ItemInput`` join this module in their own tasks,
-so ``engine_results`` is typed ``list[Any]`` until then. ``ImageRef`` joins
-here with the Task 5 extractor.
+tasks. ``EngineResult`` joined here with the Task 8 engine contract (so
+``engine_results`` is typed); ``ItemInput`` follows with Task 12's runner.
+``ImageRef`` joins here with the Task 5 extractor.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any, Literal
+from typing import Literal
 
 FetchStatus = Literal["ok", "fetch_failed"]
 FetchErrorCode = Literal[
@@ -46,6 +46,25 @@ ItemStatus = Literal[
     "unsupported",
 ]
 ItemKind = Literal["text", "image"]
+
+
+@dataclass
+class EngineResult:
+    """One engine's verdict on one Item (Task 8 contract; design §7.2).
+
+    ``score`` is the 0..100 synthetic-likelihood, ``confidence`` the 0..1
+    engine self-assessment, ``rationale`` one human-readable sentence for the
+    evidence panel, and ``latency_ms`` this analyze() call's wall-clock cost.
+    Task 12's engine runner appends these to ``Item.engine_results``; Task 13
+    aggregates them into per-item verdicts.
+    """
+
+    engine_id: str
+    engine_version: str
+    score: float  # 0..100 synthetic-likelihood
+    confidence: float  # 0..1
+    rationale: str
+    latency_ms: int
 
 
 @dataclass
@@ -87,8 +106,8 @@ class Item:
     language: str | None = None
     verdict: str | None = None
     confidence: float | None = None
-    # Filled by the engine runner (Task 7); typed once EngineResult exists.
-    engine_results: list[Any] = field(default_factory=list)
+    # Filled by the engine runner (Task 12); each entry is an EngineResult.
+    engine_results: list[EngineResult] = field(default_factory=list)
 
 
 @dataclass
