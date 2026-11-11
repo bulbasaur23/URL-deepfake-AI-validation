@@ -8,9 +8,11 @@ are used instead of ``isinstance`` on purpose: pytest imports this file as
 top-level ``test_engines`` while the registry resolves the dotted namespace
 path ``tests.test_engines``, so two distinct class objects share one name.
 
-The not-yet-written Task 9/10 winners (``text-ai-roberta`` / ``image-ai-vit``)
-must stay tolerated at preload: unimportable classes are skipped with a
-warning and ``models_loaded`` stays short, keeping Task 1's health pin green.
+The not-yet-written Task 10 winner (``image-ai-vit``) stays tolerated at
+preload, and the no-weights state is simulated (both winner ids pointed at
+nonexistent modules) where tests pin preload tolerance / the Task 1 health
+payload — Task 9's text weights are real now and load only via the
+network-marked smoke tests, never offline.
 """
 
 import asyncio
@@ -105,14 +107,19 @@ def test_get_by_id_unknown_id_raises() -> None:
         registry.get_by_id("nope", Settings())
 
 
-def test_get_by_id_unimportable_class_raises() -> None:
+def test_get_by_id_unimportable_class_raises(monkeypatch: pytest.MonkeyPatch) -> None:
     """Tolerance for unimportable entries lives in preload ONLY.
 
-    ``text-ai-roberta`` is mapped but its Task 9 module does not exist yet;
-    direct resolution must surface the import error instead of hiding it.
+    Task 9's text module exists now (its real-weight load is exercised by the
+    network-marked smoke tests, never offline), so the boundary is pinned
+    with a synthetic registry entry whose module does not exist: direct
+    resolution must surface the ImportError instead of hiding it.
     """
+    monkeypatch.setitem(
+        registry._ENGINE_SOURCES, "missing-engine", "tests._no_such_engine:_MissingEngine"
+    )
     with pytest.raises(ImportError):
-        registry.get_by_id("text-ai-roberta", Settings())
+        registry.get_by_id("missing-engine", Settings())
 
 
 def test_analyze_engine_fault_is_the_broken_item_signal() -> None:
@@ -124,12 +131,20 @@ def test_analyze_engine_fault_is_the_broken_item_signal() -> None:
         asyncio.run(engine.analyze(item))
 
 
-def test_preload_tolerates_unimportable_winners() -> None:
-    """Both default winners are the not-yet-written Task 9/10 engines.
+def test_preload_tolerates_unimportable_winners(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """preload skips winner classes that cannot import/load: warning + skip.
 
-    preload skips them with a warning, so the no-weights state still boots
-    and ``models_loaded`` stays empty (Task 1's health pin).
+    Task 9's text module now exists, so the no-weights state is simulated by
+    pointing both default winner ids at nonexistent modules (image-ai-vit
+    stays unwritten until Task 10 anyway): both are tolerated, and
+    ``models_loaded`` stays short (Task 1's health pin).
     """
+    for engine_id in ("text-ai-roberta", "image-ai-vit"):
+        monkeypatch.setitem(
+            registry._ENGINE_SOURCES, engine_id, "tests._no_such_engine:_MissingEngine"
+        )
     assert preload(Settings()) == {}
 
 
@@ -147,12 +162,20 @@ def test_preload_unknown_settings_id_fails_startup() -> None:
         preload(Settings(image_engine_id="nope"))
 
 
-def test_health_no_weights_state_matches_task1_pin() -> None:
+def test_health_no_weights_state_matches_task1_pin(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """The real lifespan wiring reproduces Task 1's exact no-weights payload.
 
-    Default settings: both winners fail to import, preload tolerates that,
+    Default settings, with both winner ids pointed at nonexistent modules
+    (the no-weights state; Task 9's text weights are real now and only load
+    via the network-marked tests / a booted app): preload tolerates both,
     and health answers ``{"models_loaded": [], "queue_depth": 0}``.
     """
+    for engine_id in ("text-ai-roberta", "image-ai-vit"):
+        monkeypatch.setitem(
+            registry._ENGINE_SOURCES, engine_id, "tests._no_such_engine:_MissingEngine"
+        )
     with TestClient(create_app()) as client:
         r = client.get("/api/health")
     assert r.status_code == 200

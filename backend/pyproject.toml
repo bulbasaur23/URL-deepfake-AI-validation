@@ -7,6 +7,9 @@ requires-python = ">=3.14"
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 asyncio_default_fixture_loop_scope = "function"
+markers = [
+    "network: touches the network (downloads the real HF checkpoint, ~500 MB first run); deselect with -m 'not network'",
+]
 
 [tool.ruff]
 line-length = 100
