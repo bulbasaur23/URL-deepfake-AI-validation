@@ -30,9 +30,9 @@ from pipeline.engines.base import Engine
 
 # Static engine map (design §7.2: "adding an engine = new class + registration").
 _ENGINE_SOURCES: dict[str, str] = {
-    "text-ai-roberta": "pipeline.engines.roberta_text:RobertaTextEngine",
-    "image-ai-vit": "pipeline.engines.vit_image:ViTImageEngine",
-    "image-ai-smaug": "pipeline.engines.smaug_image:SmaugImageEngine",
+    "text-ai-roberta": "pipeline.engines.text_roberta:RobertaTextEngine",
+    "image-ai-vit": "pipeline.engines.image_vit:ViTImageEngine",
+    "image-ai-smaug": "pipeline.engines.image_smaug:SmaugImageEngine",
 }
 
 # Modality -> the Settings field that names that modality's winner.

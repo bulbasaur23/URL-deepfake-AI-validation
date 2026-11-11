@@ -90,7 +90,7 @@ class Item:
     """One extractable content payload belonging to a scanned page.
 
     Task 5's extractor produces items (text + label, images with paths); Task
-    7's engine runner appends to ``engine_results``. Required fields come
+    12's engine runner appends to ``engine_results``. Required fields come
     first (dataclass rule), so optional fields are keyword-only in practice —
     semantics follow the brief's listing exactly, only positional order moved
     to keep the class constructible.

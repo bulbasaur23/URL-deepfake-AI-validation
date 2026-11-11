@@ -30,7 +30,10 @@ def preload(settings: Settings) -> dict[str, str]:
     ``settings.image_engine_id``; duplicate ids are deduped, iteration is
     sorted so the health payload order is deterministic). A winner whose
     class cannot import/load yet is logged + skipped — startup must not
-    crash just because weights are missing.
+    crash just because weights are missing. The instantiated engines are
+    deliberately NOT memoized here (the brief-exact return type carries only
+    versions); where preloaded instances live so the first scan never reloads
+    weights is Task 12's §11.7 decision.
     """
     loaded: dict[str, str] = {}
     for engine_id in sorted({settings.text_engine_id, settings.image_engine_id}):
