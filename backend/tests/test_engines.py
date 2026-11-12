@@ -8,11 +8,13 @@ are used instead of ``isinstance`` on purpose: pytest imports this file as
 top-level ``test_engines`` while the registry resolves the dotted namespace
 path ``tests.test_engines``, so two distinct class objects share one name.
 
-The not-yet-written Task 10 winner (``image-ai-vit``) stays tolerated at
-preload, and the no-weights state is simulated (both winner ids pointed at
-nonexistent modules) where tests pin preload tolerance / the Task 1 health
-payload — Task 9's text weights are real now and load only via the
-network-marked smoke tests, never offline.
+Both winner engines exist since Tasks 9/10, and the no-weights state is
+simulated (both winner ids pointed at nonexistent modules) where tests pin
+preload tolerance / the Task 1 health payload — the real weights load only
+via the network-marked smoke tests, never offline. The two tests whose
+default settings implicitly resolve the real ``image-ai-vit`` class are
+adapted to the same synthetic missing-module pattern (Task 10 recovery run,
+disclosed in task-10-report.md), matching the Task 9 text-id adaptations.
 """
 
 import asyncio
@@ -136,10 +138,10 @@ def test_preload_tolerates_unimportable_winners(
 ) -> None:
     """preload skips winner classes that cannot import/load: warning + skip.
 
-    Task 9's text module now exists, so the no-weights state is simulated by
-    pointing both default winner ids at nonexistent modules (image-ai-vit
-    stays unwritten until Task 10 anyway): both are tolerated, and
-    ``models_loaded`` stays short (Task 1's health pin).
+    Both winner classes are real since Tasks 9/10, so the no-weights state is
+    simulated by pointing both default winner ids at nonexistent modules:
+    both are tolerated, and ``models_loaded`` stays short (Task 1's health
+    pin).
     """
     for engine_id in ("text-ai-roberta", "image-ai-vit"):
         monkeypatch.setitem(
@@ -151,6 +153,17 @@ def test_preload_tolerates_unimportable_winners(
 def test_preload_returns_versions_for_loadable_winners(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """preload returns {id: version} for winners that import + instantiate.
+
+    ``image_engine_id``'s default (``image-ai-vit``) is real since Task 10, so
+    its map entry is pointed at a nonexistent module (the Task 9 text-id
+    adaptation pattern): zero-arg instantiating the real class would download
+    weights inside an offline test. The skipped image id is tolerated and
+    stays out of the payload — only the loadable dummy's version is returned.
+    """
+    monkeypatch.setitem(
+        registry._ENGINE_SOURCES, "image-ai-vit", "tests._no_such_engine:_MissingEngine"
+    )
     _register_dummy(monkeypatch)
     loaded = preload(Settings(text_engine_id=_DUMMY_ID))
     assert loaded == {_DUMMY_ID: _DUMMY_VERSION}
@@ -185,8 +198,18 @@ def test_health_no_weights_state_matches_task1_pin(
 def test_health_reports_preloaded_winner_version(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Once a winner class loads, its version lands in models_loaded."""
+    """Once a winner class loads, its version lands in models_loaded.
+
+    The module-level settings' default image id (``image-ai-vit``) is real
+    since Task 10, so its map entry is pointed at a nonexistent module (the
+    Task 9 text-id adaptation pattern) — the lifespan preload must never
+    touch real weights in an offline test; the tolerated skip keeps
+    models_loaded to the dummy text winner's version.
+    """
     _register_dummy(monkeypatch)
+    monkeypatch.setitem(
+        registry._ENGINE_SOURCES, "image-ai-vit", "tests._no_such_engine:_MissingEngine"
+    )
     monkeypatch.setattr(settings_module.settings, "text_engine_id", _DUMMY_ID)
     with TestClient(create_app()) as client:
         r = client.get("/api/health")
