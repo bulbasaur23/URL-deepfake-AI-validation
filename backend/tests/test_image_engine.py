@@ -185,9 +185,12 @@ def test_score_maps_label_to_synthetic_prob(engine_id: str, tmp_path: Path) -> N
     """Chosen model output → p on the synthetic (AI) side → score = 100·p."""
     engine, model = _build(engine_id, [0.9])
     result = asyncio.run(engine.analyze(_image_item(_fixture_jpeg(tmp_path))))
-    # Smaug's shipped recipe casts logits to fp32 before the sigmoid, so p
-    # carries ~1e-7 fp32 rounding; ViT softmaxes fp64 and stays exact.
-    assert result.score == pytest.approx(90.0, abs=1e-5)
+    # Both fake paths are fp64 end to end: ViT softmaxes the fake's fp64
+    # log-probabilities directly; Smaug casts its logits with .double()
+    # (image_smaug.py:198) before the mean + sigmoid. abs=1e-9 pins the exact
+    # fp64 round-trip (error ~1e-14 here) — an fp32 cast misses it by
+    # ~2.4e-6, so a regression back to .float() fails this test.
+    assert result.score == pytest.approx(90.0, abs=1e-9)
     assert result.engine_id == _ENGINE_IDS[engine_id]
     if engine_id == "vit":
         # [96.0, 64.0] proves the real fixture JPEG was opened + decoded and
@@ -203,8 +206,10 @@ def test_confidence_convention_same_as_text(engine_id: str, tmp_path: Path) -> N
     """confidence = |p − 0.5|·2 — exactly the Task 9 text-engine convention."""
     engine, _ = _build(engine_id, [0.9])
     result = asyncio.run(engine.analyze(_image_item(_fixture_jpeg(tmp_path))))
-    # fp32-tolerant for smaug's recipe-pinned .float() cast; exact for vit.
-    assert result.confidence == pytest.approx(0.8, abs=1e-7)
+    # fp64 exact on both fake paths — Smaug's logits are .double()-cast
+    # (image_smaug.py:198), ViT softmaxes fp64 directly — so abs=1e-9 pins the
+    # convention: an fp32 cast misses it by ~4.8e-8 and would fail.
+    assert result.confidence == pytest.approx(0.8, abs=1e-9)
 
     engine_coin, _ = _build(engine_id, [0.5])
     coin = asyncio.run(engine_coin.analyze(_image_item(_fixture_jpeg(tmp_path))))
@@ -218,8 +223,10 @@ def test_rationale_template(engine_id: str, tmp_path: Path) -> None:
     engine, _ = _build(engine_id, [0.4249])
     result = asyncio.run(engine.analyze(_image_item(_fixture_jpeg(tmp_path))))
     assert result.rationale == _ENGINE_RATIONALES[engine_id]
-    # fp32-tolerant for smaug's recipe-pinned .float() cast; exact for vit.
-    assert result.score == pytest.approx(42.49, abs=1e-5)  # the template's % is the score
+    # fp64 exact on both fake paths — Smaug's logits are .double()-cast
+    # (image_smaug.py:198) — so abs=1e-9 pins the template's %: an fp32 cast
+    # misses it by ~2.5e-6 and would fail.
+    assert result.score == pytest.approx(42.49, abs=1e-9)  # the template's % is the score
 
     engine_high, _ = _build(engine_id, [0.994])
     high = asyncio.run(engine_high.analyze(_image_item(_fixture_jpeg(tmp_path))))
