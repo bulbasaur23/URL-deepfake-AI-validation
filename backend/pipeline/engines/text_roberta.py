@@ -40,7 +40,7 @@ from typing import TYPE_CHECKING, Any
 import torch
 from transformers import AutoModelForSequenceClassification, AutoTokenizer
 
-from pipeline.engines.base import EngineFault
+from pipeline.engines.base import Engine, EngineFault
 from pipeline.types import EngineResult, Item
 
 if TYPE_CHECKING:
@@ -112,7 +112,7 @@ def _chunks(ids: list[int], size: int) -> list[list[int]]:
     return [ids[i : i + size] for i in range(0, len(ids), size)]
 
 
-class RobertaTextEngine:
+class RobertaTextEngine(Engine):
     """The §7.2 text winner: HC3-trained RoBERTa over chunked item text."""
 
     id = "text-ai-roberta"
