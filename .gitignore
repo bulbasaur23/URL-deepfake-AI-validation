@@ -8,7 +8,10 @@ node_modules/
 .next/
 .env
 .env.local
-data/
+# data/ holds runtime state (app.db etc.) — but the Task 11 bake-off eval
+# fixtures under data/eval/ are tracked on purpose (provenance in MANIFEST.md).
+data/*
+!data/eval/
 media/*
 !media/.gitkeep
 models/*

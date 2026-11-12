@@ -1,0 +1,7 @@
+The error you're seeing usually means you're passing a `str` where the code expects `bytes` (or the reverse). Here's how to fix it:
+
+1. Check the failing line and print `type(value)` for each argument. 2. If you open a file that must be text, use `open(path, "r", encoding="utf-8")`. 3. If an API returns bytes, decode first: `data.decode("utf-8")`. 4. When encoding, prefer explicit targets: `text.encode("utf-8")`.
+
+In most codebases this shows up at I/O boundaries — file reads, sockets, and HTTP responses. Add a tiny helper like `ensure_str(x)` and use it at those boundaries so the rest of the code can stay consistent.
+
+If you paste the full traceback, I can point at the exact line to change.
