@@ -42,7 +42,12 @@ design. ``warnings_for(scan_id)`` reads them.
 Event-loop caveat: ``submit()`` schedules the scan task on the running loop
 that called it, and every manager method must be used from that one loop
 (P1 runs a single loop; multi-worker deployments get one manager + SQLite DB
-per worker, each with its own queue depth).
+per worker, each with its own queue depth). Engine inference is synchronous
+(torch) on that same loop, so ``wait_for``/wall-clock cancellation lands at
+the next ``await`` point, never mid-inference — an inference that outlives
+its timeout still completes before the item degrades; GATE 3's memory bound
+(§11.14) therefore rests on the OOM/OSError catch plus stage-boundary
+deadline checks (review follow-up).
 """
 
 from __future__ import annotations

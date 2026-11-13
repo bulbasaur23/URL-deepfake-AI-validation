@@ -53,7 +53,11 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
                 exc,
             )
             continue
-        if engine.id in built:  # both modality ids point at one engine: one instance
+        if engine.id in built:
+            # Both modality ids point at one engine: one shared instance. With a
+            # degenerate multi-modal config the two concurrent gather groups would
+            # call that one instance simultaneously (unreachable with the real
+            # winners — noted per Task 12 review).
             engines[modality] = built[engine.id]
             continue
         built[engine.id] = engines[modality] = engine
