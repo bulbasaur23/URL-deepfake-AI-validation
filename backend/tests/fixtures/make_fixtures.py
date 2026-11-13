@@ -13,7 +13,8 @@ Writes the bake-off eval fixture set into ``<repo>/data/eval/``:
 - ``images/ai/ai_01..10.jpg`` — 9 Wikimedia Commons AI-generated images
   (per-tool categories, CC0/PD/CC-BY-SA; fetched via the CDN-cached 1280px
   thumbnail endpoints) + 1 model-author demo AI image (Smaug Space example);
-- ``MANIFEST.md`` — provenance + sha256 for every written file.
+- ``MANIFEST.md`` — provenance + sha256 for every written file (partial runs
+  list only the sections actually generated, never a KeyError).
 
 Image files are downloaded from the sources in ``IMAGE_SOURCES`` (network
 needed), EXIF-transposed, alpha-composited onto white, converted to RGB,
@@ -1055,8 +1056,31 @@ def write_image_fixtures(dest: Path, max_side: int, quality: int, force: bool) -
 
 
 def write_manifest(paths: list[Path], dest: Path, max_side: int, quality: int) -> Path:
-    """Write MANIFEST.md with provenance + sha256 for every generated file."""
+    """Write MANIFEST.md with provenance + sha256 for every generated file.
+
+    Partial runs (``--text-only`` / ``--images-only``, or an aborted image
+    fetch mid-list) generate only part of the set: a section with NO generated
+    files is skipped cleanly (never a KeyError), section file-counts are
+    computed from what was actually generated, and a PARTIAL RUN note says so.
+    """
     by_name = {path.name: path for path in paths}
+    generated = set(by_name)
+
+    def present(names: list[str]) -> list[str]:
+        return [name for name in names if name in generated]
+
+    human_names = present([entry["file"] for entry in TEXT_HUMAN])
+    ai_text_names = present([entry["file"] for entry in TEXT_AI])
+    real_expected = [s["file"] for s in IMAGE_SOURCES if s["file"].startswith("real_")]
+    ai_expected = [s["file"] for s in IMAGE_SOURCES if s["file"].startswith("ai_")]
+    real_names = present(real_expected)
+    ai_image_names = present(ai_expected)
+    partial = (
+        len(human_names) != len(TEXT_HUMAN)
+        or len(ai_text_names) != len(TEXT_AI)
+        or len(real_names) != len(real_expected)
+        or len(ai_image_names) != len(ai_expected)
+    )
     lines = [
         "# Eval fixture provenance (`data/eval`) — Task 11 bake-off",
         "",
@@ -1069,75 +1093,106 @@ def write_manifest(paths: list[Path], dest: Path, max_side: int, quality: int) -
         "Verdict bands used by the bake-off (app settings): authentic < 35,",
         "unclear 35-65, AI >= 65 (settings.band_unclear_min / band_synthetic_min).",
         "",
-        "## Text — human (`text/human/`, 20 files)",
-        "",
-        "20 single-paragraph excerpts (280-620 chars, whitespace-collapsed to",
-        "single spaces) from public-domain Project Gutenberg plain-text editions",
-        "(all pre-1930, therefore pre-AI). Provenance = book + author + year +",
-        "ebook id; source URL pattern: `https://www.gutenberg.org/ebooks/<id>`",
-        "(plain text: `https://www.gutenberg.org/cache/epub/<id>/pg<id>.txt`).",
-        "",
-        "| file | title | author | year | gutenberg id | sha256 |",
-        "|---|---|---|---|---|---|",
     ]
-    for entry in TEXT_HUMAN:
-        path = by_name[entry["file"]]
-        lines.append(
-            f"| {entry['file']} | {entry['title']} | {entry['author']} | {entry['year']} "
-            f"| {entry['gutenberg_id']} | `{sha256_of(path)}` |"
-        )
+    if partial:
+        lines += [
+            "PARTIAL RUN: only the sections actually generated are listed",
+            "(--text-only / --images-only, or an aborted image fetch).",
+            "",
+        ]
+
+    def add_separator() -> None:
+        """Exactly one blank line before the next section, never two in a row.
+
+        Section blocks may be skipped entirely on partial runs; checking the
+        previous line keeps the spacing identical to a full-run manifest.
+        """
+        if lines[-1:] != [""]:
+            lines.append("")
+
+    add_separator()
+    if human_names:
+        lines += [
+            f"## Text — human (`text/human/`, {len(human_names)} files)",
+            "",
+            "20 single-paragraph excerpts (280-620 chars, whitespace-collapsed to",
+            "single spaces) from public-domain Project Gutenberg plain-text editions",
+            "(all pre-1930, therefore pre-AI). Provenance = book + author + year +",
+            "ebook id; source URL pattern: `https://www.gutenberg.org/ebooks/<id>`",
+            "(plain text: `https://www.gutenberg.org/cache/epub/<id>/pg<id>.txt`).",
+            "",
+            "| file | title | author | year | gutenberg id | sha256 |",
+            "|---|---|---|---|---|---|",
+        ]
+        for entry in TEXT_HUMAN:
+            path = by_name.get(entry["file"])
+            if path is None:
+                continue
+            lines.append(
+                f"| {entry['file']} | {entry['title']} | {entry['author']} | {entry['year']} "
+                f"| {entry['gutenberg_id']} | `{sha256_of(path)}` |"
+            )
+    add_separator()
+    if ai_text_names:
+        lines += [
+            f"## Text — AI-style (`text/ai/`, {len(ai_text_names)} files)",
+            "",
+            f"All 20 files: {_AI_SOURCE}. Composed by the coding agent for this",
+            "bake-off in a ChatGPT-typical assistant register (polite opener,",
+            "structure, closing offer). NOT collected ChatGPT traffic.",
+            "",
+            "| file | sha256 |",
+            "|---|---|",
+        ]
+        for entry in TEXT_AI:
+            path = by_name.get(entry["file"])
+            if path is None:
+                continue
+            lines.append(f"| {entry['file']} | `{sha256_of(path)}` |")
+    add_separator()
+    if real_names:
+        lines += [
+            f"## Images — real (`images/real/`, {len(real_names)} files)",
+            "",
+            "9 NASA image-library photographs (public domain) + 1 model-author demo",
+            "photograph. All are real photographs of real subjects.",
+            "",
+            "| file | origin | note | license | source page | sha256 |",
+            "|---|---|---|---|---|---|",
+        ]
+        for source in IMAGE_SOURCES:
+            if not source["file"].startswith("real_"):
+                continue
+            path = by_name.get(source["file"])
+            if path is None:
+                continue
+            lines.append(
+                f"| {source['file']} | {source['origin']} | {source['note']} | {source['license']} "
+                f"| {source['page']} | `{sha256_of(path)}` |"
+            )
+    add_separator()
+    if ai_image_names:
+        lines += [
+            f"## Images — AI-generated (`images/ai/`, {len(ai_image_names)} files)",
+            "",
+            "9 Wikimedia Commons AI-generated images (per-tool categories, license",
+            "as stated on each Commons file page) + 1 model-author demo AI image.",
+            "",
+            "| file | origin | note | license | source page | sha256 |",
+            "|---|---|---|---|---|---|",
+        ]
+        for source in IMAGE_SOURCES:
+            if not source["file"].startswith("ai_"):
+                continue
+            path = by_name.get(source["file"])
+            if path is None:
+                continue
+            lines.append(
+                f"| {source['file']} | {source['origin']} | {source['note']} | {source['license']} "
+                f"| {source['page']} | `{sha256_of(path)}` |"
+            )
+    add_separator()
     lines += [
-        "",
-        "## Text — AI-style (`text/ai/`, 20 files)",
-        "",
-        f"All 20 files: {_AI_SOURCE}. Composed by the coding agent for this",
-        "bake-off in a ChatGPT-typical assistant register (polite opener,",
-        "structure, closing offer). NOT collected ChatGPT traffic.",
-        "",
-        "| file | sha256 |",
-        "|---|---|",
-    ]
-    for entry in TEXT_AI:
-        path = by_name[entry["file"]]
-        lines.append(f"| {entry['file']} | `{sha256_of(path)}` |")
-    lines += [
-        "",
-        "## Images — real (`images/real/`, 10 files)",
-        "",
-        "9 NASA image-library photographs (public domain) + 1 model-author demo",
-        "photograph. All are real photographs of real subjects.",
-        "",
-        "| file | origin | note | license | source page | sha256 |",
-        "|---|---|---|---|---|---|",
-    ]
-    for source in IMAGE_SOURCES:
-        if not source["file"].startswith("real_"):
-            continue
-        path = by_name[source["file"]]
-        lines.append(
-            f"| {source['file']} | {source['origin']} | {source['note']} | {source['license']} "
-            f"| {source['page']} | `{sha256_of(path)}` |"
-        )
-    lines += [
-        "",
-        "## Images — AI-generated (`images/ai/`, 10 files)",
-        "",
-        "9 Wikimedia Commons AI-generated images (per-tool categories, license",
-        "as stated on each Commons file page) + 1 model-author demo AI image.",
-        "",
-        "| file | origin | note | license | source page | sha256 |",
-        "|---|---|---|---|---|---|",
-    ]
-    for source in IMAGE_SOURCES:
-        if not source["file"].startswith("ai_"):
-            continue
-        path = by_name[source["file"]]
-        lines.append(
-            f"| {source['file']} | {source['origin']} | {source['note']} | {source['license']} "
-            f"| {source['page']} | `{sha256_of(path)}` |"
-        )
-    lines += [
-        "",
         "## Regeneration caveats",
         "",
         "- Text fixtures are embedded in the generator (offline, byte-stable).",
@@ -1175,7 +1230,11 @@ def main() -> None:
         generated += write_image_fixtures(EVAL_DIR, args.max_side, args.quality, args.force)
     manifest = write_manifest(generated, EVAL_DIR, args.max_side, args.quality)
     print(f"wrote {len(generated)} fixture files + {manifest.name} into {EVAL_DIR}")
-    if len(generated) != 60:
+    # The 60-file completeness check applies to FULL runs only: --text-only
+    # writes 40 and --images-only writes 20 by design (the manifest lists
+    # whatever was actually generated).
+    ran_full = not args.images_only and not args.text_only
+    if ran_full and len(generated) != 60:
         sys.exit(f"expected 60 fixture files (40 text + 20 images), got {len(generated)}")
 
 

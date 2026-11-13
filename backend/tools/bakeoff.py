@@ -141,10 +141,36 @@ def load_items(modality: str, data_dir: Path) -> list[tuple[str, str, Item]]:
     return triples
 
 
+def missing_truth_classes(modality: str, data_dir: Path) -> list[str]:
+    """Truth classes whose fixture directory yielded no fixtures (degenerate eval tree).
+
+    A wrong ``--data-dir`` or a deleted subtree silently scores nothing and
+    would otherwise emit a fake ``measured | 0.00% (0/0)`` row; the caller
+    turns any empty class into a blocked row instead.
+    """
+    suffix = TEXT_SUFFIX if modality == "text" else IMAGE_SUFFIX
+    return [
+        truth
+        for subtree, truth in TREE[modality].values()
+        if not any((data_dir / subtree).glob(f"*{suffix}"))
+    ]
+
+
 async def run_candidate(engine_id: str, env_label: str, data_dir: Path) -> CandidateReport:
     """Construct the candidate and score its modality's eval set (per-item degrade)."""
     modality = modality_of(engine_id)
     triples = load_items(modality, data_dir)
+    missing = missing_truth_classes(modality, data_dir)
+    if missing:
+        # Degenerate eval tree: fail the candidate as a blocked row BEFORE
+        # constructing the engine (no weight load on a wrong --data-dir).
+        return CandidateReport(
+            engine_id,
+            modality,
+            env_label,
+            f"no fixtures found for class(es) {', '.join(missing)} under {data_dir}",
+            [],
+        )
     try:
         engine: Engine = registry.get_by_id(engine_id, settings)
     except Exception as exc:  # noqa: BLE001 — whole-candidate blocked row, never a fake number
@@ -195,7 +221,8 @@ def summarize(report: CandidateReport) -> dict[str, Any]:
     )
     n_human_all = sum(1 for item in report.items if item.truth == "human")
     latencies = [item.latency_ms for item in successful if item.latency_ms is not None]
-    mean_latency = sum(latencies) / len(latencies) if latencies else 0.0
+    mean_latency: float | None = sum(latencies) / len(latencies) if latencies else None
+    # FP convention (ruling 3): failed items have no score (never FPs) but stay in the denominator.
     fp = sum(1 for item in human if item.score >= settings.band_synthetic_min)
     unclear = sum(1 for item in successful if item.band == "unclear")
     return {
@@ -225,11 +252,16 @@ def table_row(report: CandidateReport) -> str:
     notes = (
         f"{stats['failures']} per-item failures (counted incorrect)" if stats["failures"] else ""
     )
+    # Zero successful latencies (all items failed) means NO mean latency exists:
+    # render "—" rather than a fabricated "0 ms" measured row.
+    mean_cell = (
+        f"{stats['mean_latency_ms']:.0f} ms" if stats["mean_latency_ms"] is not None else "—"
+    )
     return (
         f"| `{report.engine_id}` | {report.modality} | {report.env_label} | measured | "
         f"{fmt_pct(stats['accuracy'])} ({stats['correct']}/{stats['n']}) | "
         f"{fmt_pct(stats['fp_rate'])} ({stats['fp']}/{stats['n_human_all']}) | "
-        f"{fmt_pct(stats['unclear_rate'])} | {stats['mean_latency_ms']:.0f} ms | {notes} |"
+        f"{fmt_pct(stats['unclear_rate'])} | {mean_cell} | {notes} |"
     )
 
 
@@ -238,7 +270,7 @@ def print_details(reports: list[CandidateReport]) -> None:
     for report in reports:
         print(f"\n### per-item: {report.engine_id} [{report.env_label}]")
         if report.blocked is not None:
-            print(f"  BLOCKED at construct/load: {report.blocked}")
+            print(f"  BLOCKED: {report.blocked}")
             continue
         for item in report.items:
             if item.error is not None:
