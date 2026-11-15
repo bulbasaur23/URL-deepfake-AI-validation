@@ -147,6 +147,13 @@ class _FakeEngine:
         )
 
 
+class _ExplodingSupportsEngine(_FakeEngine):
+    """A supports() that raises — a contract violation the manager must contain."""
+
+    def supports(self, item: Item) -> bool:
+        raise RuntimeError("supports exploded")
+
+
 class _RecordingManager(ScanJobManager):
     """Test double: records every persisted status transition (ruling 3)."""
 
@@ -440,3 +447,95 @@ async def test_image_rows_bind_engine_results(
         session.close()
     assert len(snapshots) == 1  # no duplicate snapshot rows either
     assert snapshots[0].path.startswith(str(tmp_path / "media"))
+
+
+async def test_wait_returns_when_task_dies_with_stuck_row(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Double fault (run() raises AND the failed-write raises) must not hang wait().
+
+    The orchestrator's catch-all writes ``failed`` via ``_write_scan``; if even
+    that write fails (simulated SQLite lock), the job task dies with the Scan
+    row stuck mid-ladder. ``wait()`` must resolve through the TRACKED TASK in
+    that case: awaiting it surfaces the chained terminal error (the original
+    orchestrator error as ``__cause__``, never masked by the write failure)
+    instead of polling a row that can never move. Wrapped in ``asyncio.timeout``
+    so a RED regression fails loudly rather than hanging the suite.
+    """
+    engine = _FakeEngine("text")
+    manager, test_settings = _make_manager(tmp_path, {"text": engine})
+
+    def locked_write(scan_id: int, **fields: object) -> None:
+        if fields.get("status") == "failed":
+            raise RuntimeError("sqlite locked: terminal write refused")
+        ScanJobManager._write_scan(manager, scan_id, **fields)  # non-terminal writes land
+
+    monkeypatch.setattr(manager, "_write_scan", locked_write)  # instance-level override
+
+    async def exploding_fetch(url: str, settings: Settings) -> FetchResult:
+        raise RuntimeError("fetch exploded")
+
+    monkeypatch.setattr(fetcher, "fetch", exploding_fetch)
+
+    scan_id = await manager.submit(_PAGE_URL, "test-ip-hash")
+    with pytest.raises(RuntimeError, match="terminal write failed") as excinfo:
+        async with asyncio.timeout(2.0):
+            await manager.wait(scan_id)
+    # The write failure must not mask the original: chained as __cause__.
+    assert str(excinfo.value.__cause__) == "fetch exploded"
+    # Exactly the stuck state DB-polling alone can never resolve.
+    scan, _, _ = _snapshot_db(test_settings, scan_id)
+    assert scan.status == "fetching" and scan.error_code is None
+
+
+async def test_canonicalize_malformed_url_falls_back_to_raw(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``urlsplit('http://[::1/x')`` raises ValueError — submit must survive it.
+
+    The unclosed IPv6 literal used to crash ``submit()`` BEFORE any Scan row
+    existed. The fix falls back to the RAW URL as ``url_canonical`` (minimal
+    degradation, documented in the docstring); Task 14's route validation
+    still 422s this shape for HTTP callers — unchanged here.
+    """
+    engine = _FakeEngine("text")
+    manager, test_settings = _make_manager(tmp_path, {"text": engine})
+
+    async def blocked_fetch(url: str, settings: Settings) -> FetchResult:
+        return FetchResult(status="fetch_failed", error_code="bad_scheme")
+
+    monkeypatch.setattr(fetcher, "fetch", blocked_fetch)
+
+    malformed = "http://[::1/x"  # unclosed IPv6 literal: urlsplit raises ValueError
+    scan_id = await _run_one(manager, url=malformed)
+
+    scan, items, _ = _snapshot_db(test_settings, scan_id)
+    assert scan.url == malformed
+    assert scan.url_canonical == malformed  # raw fallback — submit did not crash
+    assert scan.status == "failed" and scan.error_code == "bad_scheme"
+    assert items == []
+
+
+async def test_supports_raise_marks_item_unavailable_scan_continues(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A raising supports() degrades JUST the item; the scan still ships.
+
+    supports() used to run OUTSIDE the per-item guard, so a raise failed the
+    whole scan through the gather re-raise loop. Fixed: the raise is contained
+    per item — the engine never ran, so the item ends ``unavailable`` (not
+    ``degraded``) with zero engine calls, and the scan continues to done.
+    """
+    engine = _ExplodingSupportsEngine("text")
+    manager, test_settings = _make_manager(tmp_path, {"text": engine})
+    monkeypatch.setattr(fetcher, "fetch", _html_fetch(_EN_1, _EN_2))
+
+    scan_id = await _run_one(manager)
+
+    scan, items, results = _snapshot_db(test_settings, scan_id)
+    assert scan.status == "done" and scan.error_code is None  # never failed the scan
+    assert [row.status for row in items] == ["unavailable", "unavailable"]  # never ran
+    assert len(results) == 0 and engine.calls == []  # zero engine calls
+    # Zero analyzed → the wired aggregate seam reports insufficient_data (§7.4).
+    assert scan.verdict == "insufficient_data" and scan.confidence is None
+    assert manager.warnings_for(scan_id) == ["x_escaped_analysis"]

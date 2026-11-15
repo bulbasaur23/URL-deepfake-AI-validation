@@ -96,9 +96,20 @@ def _canonicalize(url: str) -> str:
     lowercase the host (``urlsplit`` already lowercases scheme and hostname),
     and drop userinfo so credentials never reach stored URLs (GATE 4). Path,
     query, and explicit ports are preserved verbatim.
+
+    Fallback (CodeRabbit follow-up): a URL ``urlsplit`` itself rejects — e.g.
+    the unclosed IPv6 literal ``http://[::1/x`` raises ``ValueError`` — falls
+    back to the RAW URL unchanged, so ``submit()`` still persists its Scan row
+    (minimal degradation: the caller's exact string is stored verbatim).
+    Task 14's route validation remains the gate for HTTP callers; this only
+    keeps direct/internal callers robust. Non-numeric ports degrade just the
+    port (the existing ``parts.port`` guard below), not the whole URL.
     """
-    parts = urllib.parse.urlsplit(url)
-    host = (parts.hostname or "").lower()
+    try:
+        parts = urllib.parse.urlsplit(url)
+        host = (parts.hostname or "").lower()
+    except ValueError:
+        return url  # unparseable: store raw, never crash submit before the row exists
     try:
         port = parts.port
     except ValueError:
@@ -154,9 +165,29 @@ class ScanJobManager:
         DB-polled on purpose: the terminal status is the one persisted fact
         callers care about, and polling keeps the public surface free of task
         plumbing (P1: single process, SQLite-local reads).
+
+        Liveness (CodeRabbit follow-up): the tracked job task doubles as a
+        completion signal. A double fault — ``run()`` raises AND the
+        ``_guarded_run`` terminal write raises too — leaves the row stuck
+        mid-ladder, where DB polling alone would spin forever. So when the
+        task is done, ``wait`` awaits it (surfacing the task's exception,
+        with the original orchestrator error chained as ``__cause__``) and
+        re-checks the row ONCE: a task that ended without the row reaching a
+        terminal status raises ``RuntimeError`` here instead of polling a row
+        that can never move. The happy path is unchanged (the DB check runs
+        first, so terminal rows return before any task plumbing).
         """
         while True:
             if self._load_scan(scan_id).status in ("done", "failed"):
+                return
+            task = self._tasks.get(scan_id)
+            if task is not None and task.done():
+                await task  # surfaces the task's exception (or returns cleanly)
+                if self._load_scan(scan_id).status not in ("done", "failed"):
+                    raise RuntimeError(
+                        f"scan {scan_id}: job task ended without a terminal status; "
+                        "refusing to poll a row that can never move"
+                    )
                 return
             await asyncio.sleep(0.01)
 
@@ -316,13 +347,29 @@ class ScanJobManager:
         The broad catch is the last-resort net for orchestrator bugs (the
         vocab has no crash token — the status alone says failed, error_code
         stays None, nothing is invented). Cancellation is never swallowed.
+
+        The terminal write is best-effort (CodeRabbit follow-up): if even the
+        failed-write fails (e.g. SQLite locked), the original orchestrator
+        error must not be masked — the raised ``RuntimeError`` chains it as
+        ``__cause__`` — and the task still ends resolvable (``wait`` surfaces
+        it or sees the row terminal), never leaving a scan un-resolvable.
         """
         async with self._semaphore:
             try:
                 await self.run(scan_id)
-            except Exception:
+            except Exception as original:
                 logger.exception("scan %s: unexpected orchestrator error", scan_id)
-                self._write_scan(scan_id, status="failed")
+                try:
+                    self._write_scan(scan_id, status="failed")
+                except Exception as write_failure:
+                    logger.error(
+                        "scan %s: terminal write failed; original error chained",
+                        scan_id,
+                        exc_info=write_failure,
+                    )
+                    raise RuntimeError(
+                        f"scan {scan_id}: terminal write failed; original error chained"
+                    ) from original
 
     def _on_deadline(
         self, scan_id: int, items: Sequence[Item], bindings: Mapping[int, int]
@@ -355,15 +402,38 @@ class ScanJobManager:
 
         Items whose status is not ``ok`` (language-gated text, failed/blocked
         images) skip engines entirely. With no loaded engine for the modality
-        (startup skip) or an engine that does not claim the item, the item
-        ends ``unavailable`` — the engine never ran on it.
+        (startup skip), an engine that does not claim the item, or a
+        ``supports()`` raise (CodeRabbit follow-up — the call is guarded so a
+        contract violation cannot fail the whole scan), the item ends
+        ``unavailable`` — the engine never ran on it. Two separate guards keep
+        the status precise: a ``supports()`` raise lands ``unavailable`` (never
+        ran), while an ``analyze()`` failure lands ``degraded`` (ran, broke).
         """
         engine = self._engines.get(modality)
         for item in group_items:
             if item.status != "ok":
                 continue  # unsupported / fetch_failed / ... never reach an engine
-            if engine is None or not engine.supports(item):
-                item.status = "unavailable"  # engine missing or not claiming it
+            if engine is None:
+                item.status = "unavailable"  # startup skip: nothing could run
+                logger.warning("scan item %s: no engine ran on it", item.source_ref)
+                continue
+            try:
+                claimed = engine.supports(item)
+            except Exception as exc:
+                # supports() is part of the engine contract: a raise here is
+                # the same "broken on this item" case as analyze raising — but
+                # the engine NEVER ran, so the item is unavailable (not
+                # degraded) and the scan continues (one item never fails it).
+                logger.warning(
+                    "scan item %s: engine %s supports() raised; item unavailable",
+                    item.source_ref,
+                    engine.id,
+                    exc_info=exc,
+                )
+                item.status = "unavailable"
+                continue
+            if not claimed:
+                item.status = "unavailable"  # the engine does not claim it
                 logger.warning("scan item %s: no engine ran on it", item.source_ref)
                 continue
             try:
