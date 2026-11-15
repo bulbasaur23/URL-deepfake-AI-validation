@@ -245,12 +245,67 @@ class ScanJobManager:
                         raise outcome
                 self._persist_analysis(items, bindings)
                 self._write_scan(scan_id, status="aggregating")
-                # --- Task 13 seam -------------------------------------------------
-                # Task 13 fills aggregate_verdict here: read each item's
-                # engine_results, fill ScanItem.verdict/confidence and
-                # Scan.verdict/confidence in the final write below. Task 12
-                # leaves every verdict/confidence None.
-                self._write_scan(scan_id, status="done")
+                # --- Task 13 seam (wired by Task 14) ------------------------------
+                # Task 12 left every verdict/confidence None; Task 14 wires the
+                # reviewed aggregator here. Per item: an engine result bands its
+                # score into the per-item verdict (verdict_from_score, settings
+                # bands — never hardcoded 35/65) and carries the engine's own
+                # confidence; an item with no result keeps verdict None and
+                # abstains downstream (§11.13). One reading per item in v1 (one
+                # winner engine per modality, §11.6). Scan.verdict stores the
+                # AGGREGATE token verbatim (design §7.4: synthetic_detected |
+                # mixed | authentic | insufficient_data) — never a per-item
+                # band token; Scan.confidence is the report's determining-
+                # evidence confidence (design §7.4).
+                #
+                # Seam-local import: this marked block is the only Task-14
+                # edit zone in manager.py, so the dependency cannot move to
+                # the module imports without violating the seam contract.
+                from pipeline.aggregate import aggregate_verdict, verdict_from_score
+
+                report_items: list[dict[str, object]] = []
+                judged: list[tuple[int, str, float | None]] = []  # (row_id, verdict, conf)
+                for item in items:
+                    if item.engine_results:
+                        reading = item.engine_results[0]
+                        verdict = verdict_from_score(reading.score, settings)
+                        confidence: float | None = reading.confidence
+                    else:
+                        verdict = None  # never analyzed → abstains (§11.13)
+                        confidence = None
+                    report_items.append(
+                        {
+                            "kind": item.kind,
+                            "status": item.status,
+                            "verdict": verdict,
+                            "confidence": confidence,
+                        }
+                    )
+                    row_id = bindings.get(id(item))
+                    if verdict is not None and row_id is not None:
+                        judged.append((row_id, verdict, confidence))
+                report = aggregate_verdict(report_items, settings)
+                # The seam report carries the manager's warning tokens for any
+                # in-process consumer. They are still INCOMPLETE here (the
+                # _final_warnings call runs after this block), so the Task 14
+                # API reads warnings_for() at GET time, where the list is final.
+                report.warnings = list(self.warnings_for(scan_id))
+                # Persist the per-item verdicts in one batch, then the final
+                # write lands the aggregate on the Scan row (status flow stays
+                # aggregating → done).
+                session = get_session(settings)
+                try:
+                    for row_id, item_verdict, item_confidence in judged:
+                        row = session.get(ScanItem, row_id)
+                        if row is not None:
+                            row.verdict = item_verdict
+                            row.confidence = item_confidence
+                    session.commit()
+                finally:
+                    session.close()
+                self._write_scan(
+                    scan_id, status="done", verdict=report.verdict, confidence=report.confidence
+                )
         except TimeoutError:
             self._on_deadline(scan_id, items, bindings)
         self._final_warnings(scan_id, extraction, items)

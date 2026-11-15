@@ -255,7 +255,12 @@ async def test_status_progression_persisted(
     assert engine.statuses_seen == ["analyzing", "analyzing"]  # both items analyzed mid-stage
     scan, items, results = _snapshot_db(test_settings, state["scan_id"])
     assert scan.status == "done"
-    assert scan.verdict is None and scan.confidence is None  # Task 13 fills these
+    # Task 14 wired the aggregate seam: the fake engine scored both items 42.0
+    # (→ unclear, confidence 0.8), an all-unclear page → insufficient_data with
+    # max-analyzed confidence (§11.13) — never a per-item band token on Scan.
+    assert scan.verdict == "insufficient_data" and scan.confidence == 0.8
+    assert [row.verdict for row in items] == ["unclear", "unclear"]
+    assert [row.confidence for row in items] == [0.8, 0.8]
     assert scan.title == "Test Page" and scan.domain == "page.test"
     assert scan.url == "HTTP://Page.test/article#section"  # stored as submitted
     assert scan.url_canonical == "http://page.test/article"  # fragment gone, host lowered
